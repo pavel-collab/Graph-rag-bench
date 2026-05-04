@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+storage/
+data/corpus/
+data/datasets/
+data/answers/
+*.egg-info/
+.DS_Store
