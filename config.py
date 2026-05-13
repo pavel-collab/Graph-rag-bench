@@ -9,8 +9,15 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr = SecretStr("sk-placeholder")
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_model: str = "openai/gpt-4o-mini"
+
+    # LightRAG embeddings (OpenAI-compatible via OpenRouter, 1536-dim)
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
+
+    # HippoRAG embeddings (local sentence-transformers, 1024-dim)
+    # Uses "Transformers/<model>" prefix to route to TransformersEmbeddingModel
+    hipporag_embedding_model: str = "Transformers/BAAI/bge-m3"
+    hipporag_embedding_dim: int = 1024
 
     # PostgreSQL
     postgres_host: str = "localhost"

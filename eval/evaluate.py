@@ -29,8 +29,15 @@ logger = logging.getLogger(__name__)
 
 
 def _setup_deepeval() -> None:
-    """Configure DeepEval to use the project LLM. DeepEval requires OPENAI_API_KEY."""
+    """Configure DeepEval to use the project LLM via OpenAI-compatible env vars.
+
+    DeepEval instantiates the openai SDK without passing base_url, so the SDK
+    falls back to os.environ["OPENAI_BASE_URL"]. Both the key and the base URL
+    must be set as env vars — passing them in code has no effect on the default
+    metric models.
+    """
     os.environ["OPENAI_API_KEY"] = settings.openai_api_key.get_secret_value()
+    os.environ["OPENAI_BASE_URL"] = settings.llm_base_url
     os.environ.setdefault("DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS", "120")
     os.environ.setdefault("DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE", "600")
 
@@ -61,6 +68,52 @@ def _build_test_cases(answers: list[dict]):
     return cases
 
 
+def _build_metric_model():
+    """Explicit GPTModel pinned to a specific OpenAI model with a generous
+    max_completion_tokens. Default DeepEval picks gpt-4.1 and passes no token
+    limit; through OpenRouter the structured-output response gets truncated
+    mid-JSON and pydantic raises a parse error.
+
+    Wrapped in a retry layer because OpenRouter occasionally returns an HTML
+    error page (rate-limit / Cloudflare 5xx) instead of JSON — DeepEval's
+    built-in tenacity retry only catches openai.* network exceptions, so
+    JSONDecodeError / pydantic ValidationError leak through.
+    """
+    import asyncio
+    import json as _json
+    from deepeval.models.llms.openai_model import GPTModel
+    from pydantic import ValidationError
+
+    transient = (_json.JSONDecodeError, ValidationError)
+
+    class RetryingGPTModel(GPTModel):
+        async def a_generate(self, prompt, schema=None):
+            last_exc = None
+            for attempt in range(4):
+                try:
+                    return await super().a_generate(prompt, schema)
+                except transient as e:
+                    last_exc = e
+                    await asyncio.sleep(2 ** attempt)
+            raise last_exc
+
+        def generate(self, prompt, schema=None):
+            last_exc = None
+            for attempt in range(4):
+                try:
+                    return super().generate(prompt, schema)
+                except transient as e:
+                    last_exc = e
+            raise last_exc
+
+    return RetryingGPTModel(
+        model="gpt-4o-mini",
+        _openai_api_key=settings.openai_api_key.get_secret_value(),
+        base_url=settings.llm_base_url,
+        generation_kwargs={"max_completion_tokens": 16000},
+    )
+
+
 def _build_metrics(use_expected: bool):
     from deepeval.metrics import (
         AnswerRelevancyMetric,
@@ -70,14 +123,15 @@ def _build_metrics(use_expected: bool):
         HallucinationMetric,
     )
 
+    model = _build_metric_model()
     metrics = [
-        AnswerRelevancyMetric(threshold=0.5, verbose_mode=False),
-        FaithfulnessMetric(threshold=0.5, verbose_mode=False),
-        HallucinationMetric(threshold=0.5, verbose_mode=False),
-        ContextualPrecisionMetric(threshold=0.5, verbose_mode=False),
+        AnswerRelevancyMetric(threshold=0.5, model=model, verbose_mode=False),
+        FaithfulnessMetric(threshold=0.5, model=model, verbose_mode=False),
+        HallucinationMetric(threshold=0.5, model=model, verbose_mode=False),
+        ContextualPrecisionMetric(threshold=0.5, model=model, verbose_mode=False),
     ]
     if use_expected:
-        metrics.append(ContextualRecallMetric(threshold=0.5, verbose_mode=False))
+        metrics.append(ContextualRecallMetric(threshold=0.5, model=model, verbose_mode=False))
     return metrics
 
 
@@ -100,7 +154,13 @@ def evaluate_file(answers_path: Path, charts: bool) -> dict:
     has_expected = any(tc.expected_output for tc in test_cases)
     metrics = _build_metrics(has_expected)
 
-    results = dv_evaluate(test_cases=test_cases, metrics=metrics, run_async=True)
+    from deepeval.evaluate.configs import AsyncConfig
+
+    results = dv_evaluate(
+        test_cases=test_cases,
+        metrics=metrics,
+        async_config=AsyncConfig(max_concurrent=4, throttle_value=0),
+    )
 
     # Aggregate scores
     metric_scores: dict[str, list[float]] = {}

@@ -9,3 +9,4 @@ data/datasets/
 data/answers/
 *.egg-info/
 .DS_Store
+.deepeval

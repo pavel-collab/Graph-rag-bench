@@ -36,23 +36,22 @@ def query_all(questions: list[dict], num_retrieve: int) -> list[dict]:
     logger.info("Running rag_qa for %d questions...", len(texts))
 
     try:
-        results = hipporag.rag_qa(queries=texts)
+        queries_solutions, _, _ = hipporag.rag_qa(queries=texts)
     except Exception as e:
         logger.error("rag_qa failed: %s", e)
-        results = [{"answer": "", "docs": []} for _ in texts]
+        queries_solutions = [None] * len(texts)
+
+    if len(queries_solutions) != len(questions):
+        logger.warning(
+            "rag_qa returned %d solutions for %d questions",
+            len(queries_solutions), len(questions),
+        )
 
     answers = []
-    for item, result in zip(questions, results):
-        if isinstance(result, dict):
-            answer = result.get("answer", "")
-            docs = result.get("docs", [])
-        elif isinstance(result, (list, tuple)) and len(result) == 2:
-            answer, docs = result
-        else:
-            answer = str(result)
-            docs = []
-
-        retrieval_context = [d["text"] if isinstance(d, dict) else str(d) for d in docs]
+    for item, sol in zip(questions, queries_solutions):
+        answer = getattr(sol, "answer", "") or ""
+        docs = getattr(sol, "docs", None) or []
+        retrieval_context = [str(d) for d in docs[:num_retrieve]]
 
         answers.append({
             "id": item.get("id", ""),

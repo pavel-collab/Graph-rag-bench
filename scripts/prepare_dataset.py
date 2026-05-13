@@ -29,6 +29,7 @@ def main() -> None:
 
     parser.add_argument("--split", default="validation")
     parser.add_argument("--limit", type=int, default=200, help="Max number of QA pairs")
+    parser.add_argument("--corpus-limit", type=int, default=None, help="Max number of corpus documents to save")
     parser.add_argument("--corpus-dir", type=Path, default=Path("data/corpus"))
     parser.add_argument("--questions-out", type=Path, default=Path("data/questions.json"))
     args = parser.parse_args()
@@ -39,6 +40,8 @@ def main() -> None:
         if args.limit:
             texts = texts[: args.limit]
             questions = questions[: args.limit]
+        if args.corpus_limit:
+            texts = texts[: args.corpus_limit]
         save_corpus(texts, args.corpus_dir)
         save_questions(questions, args.questions_out)
     else:
@@ -47,6 +50,9 @@ def main() -> None:
         )
         if args.limit:
             questions = questions[: args.limit]
+        if args.corpus_limit:
+            corpus = corpus[: args.corpus_limit]
+            logger.info("Corpus limited to %d documents (--corpus-limit)", len(corpus))
         save_corpus(corpus, args.corpus_dir)
         save_questions(questions, args.questions_out)
 

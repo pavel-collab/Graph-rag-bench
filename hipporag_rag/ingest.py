@@ -34,12 +34,15 @@ def _load_docs(docs_dir: Path, recursive: bool) -> list[str]:
     return docs
 
 
-def ingest(docs_dir: Path, recursive: bool) -> int:
+def ingest(docs_dir: Path, recursive: bool, max_docs: int | None = None) -> int:
     # Lazy import — hipporag pulls in torch/transformers which are heavy
     from hipporag import HippoRAG
 
     docs = _load_docs(docs_dir, recursive)
     logger.info("Loaded %d documents from %s", len(docs), docs_dir)
+    if max_docs is not None:
+        docs = docs[:max_docs]
+        logger.info("Limiting to %d documents (--max-docs)", max_docs)
 
     cfg = get_hipporag_config()
     logger.info("Initializing HippoRAG (save_dir=%s)", cfg["save_dir"])
@@ -55,13 +58,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest documents into HippoRAG 2")
     parser.add_argument("--docs-dir", required=True, type=Path)
     parser.add_argument("--recursive", action="store_true")
+    parser.add_argument("--max-docs", type=int, default=None, help="Limit total number of documents to ingest")
     args = parser.parse_args()
 
     if not args.docs_dir.exists():
         logger.error("Directory not found: %s", args.docs_dir)
         raise SystemExit(1)
 
-    ingest(args.docs_dir, args.recursive)
+    ingest(args.docs_dir, args.recursive, args.max_docs)
 
 
 if __name__ == "__main__":

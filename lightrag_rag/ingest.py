@@ -44,11 +44,14 @@ def _load_docs(docs_dir: Path, recursive: bool) -> list[tuple[Path, str]]:
     return docs
 
 
-async def ingest(docs_dir: Path, recursive: bool, batch_size: int, resume: bool) -> int:
+async def ingest(docs_dir: Path, recursive: bool, batch_size: int, resume: bool, max_docs: int | None = None) -> int:
     rag = await create_lightrag()
 
     docs = _load_docs(docs_dir, recursive)
     logger.info("Found %d documents in %s", len(docs), docs_dir)
+    if max_docs is not None:
+        docs = docs[:max_docs]
+        logger.info("Limiting to %d documents (--max-docs)", max_docs)
 
     progress_path = Path(rag.working_dir) / PROGRESS_FILE
     uploaded: dict[str, str] = {}
@@ -84,13 +87,14 @@ def main() -> None:
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--batch-size", type=int, default=5)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--max-docs", type=int, default=None, help="Limit total number of documents to ingest")
     args = parser.parse_args()
 
     if not args.docs_dir.exists():
         logger.error("Directory not found: %s", args.docs_dir)
         raise SystemExit(1)
 
-    asyncio.run(ingest(args.docs_dir, args.recursive, args.batch_size, args.resume))
+    asyncio.run(ingest(args.docs_dir, args.recursive, args.batch_size, args.resume, args.max_docs))
 
 
 if __name__ == "__main__":

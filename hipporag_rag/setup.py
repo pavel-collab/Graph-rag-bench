@@ -27,9 +27,10 @@ def get_hipporag_config() -> dict:
 
     return dict(
         save_dir=wd,
-        llm_model=settings.llm_model,
-        embedding_model=settings.embedding_model,
+        llm_model_name=settings.llm_model,
         llm_base_url=settings.llm_base_url,
-        # Personalized PageRank damping factor (higher = longer hops)
-        damping=0.1,
+        # Local sentence-transformers model — no API key needed.
+        # "Transformers/<id>" prefix routes HippoRAG to TransformersEmbeddingModel.
+        # bge-m3 dim=1024; unrelated to LightRAG's OpenAI embeddings (dim=1536).
+        embedding_model_name=settings.hipporag_embedding_model,
     )
