@@ -69,27 +69,55 @@ def _build_test_cases(answers: list[dict]):
 
 
 def _build_metric_model():
-    """Explicit GPTModel pinned to a specific OpenAI model with a generous
-    max_completion_tokens. Default DeepEval picks gpt-4.1 and passes no token
-    limit; through OpenRouter the structured-output response gets truncated
-    mid-JSON and pydantic raises a parse error.
+    """Explicit GPTModel pinned to a specific OpenAI model with a bounded
+    max_completion_tokens. DeepEval JSON responses are small structured objects;
+    a huge cap only matters when the model degenerates into an unbounded list.
 
-    Wrapped in a retry layer because OpenRouter occasionally returns an HTML
-    error page (rate-limit / Cloudflare 5xx) instead of JSON — DeepEval's
-    built-in tenacity retry only catches openai.* network exceptions, so
-    JSONDecodeError / pydantic ValidationError leak through.
+    Two patches applied to deepeval.models.llms.openai_model:
+      1. Drop `openai.LengthFinishReasonError` from retryable_exceptions.
+         Through OpenRouter, gpt-4o-mini's strict-structured-output enforcement
+         is unreliable — when prompts have multiple retrieval_context items the
+         model can produce verdicts forever, hitting max_completion_tokens. The
+         response is identical on every retry, so retrying is pointless.
+      2. Add tenacity `stop_after_attempt(3)` so transient retries can't spin
+         forever (DeepEval's default has no stop condition).
+
+    Wrapped in a retry layer for JSON/pydantic parse errors leaking past the
+    SDK's network-only tenacity catch.
     """
     import asyncio
     import json as _json
-    from deepeval.models.llms.openai_model import GPTModel
+    from openai import LengthFinishReasonError
     from pydantic import ValidationError
+    from tenacity import (
+        retry as _retry,
+        retry_if_exception_type,
+        stop_after_attempt,
+        wait_exponential_jitter,
+    )
+    import deepeval.models.llms.openai_model as _om
 
-    transient = (_json.JSONDecodeError, ValidationError)
+    if not getattr(_om, "_graph_rag_benchmark_patched", False):
+        new_retryable = tuple(
+            e for e in _om.retryable_exceptions if e is not LengthFinishReasonError
+        )
+        decorator = _retry(
+            wait=wait_exponential_jitter(initial=1, exp_base=2, jitter=2, max=10),
+            retry=retry_if_exception_type(new_retryable),
+            stop=stop_after_attempt(3),
+            after=_om.log_retry_error,
+        )
+        for name in ("generate", "a_generate"):
+            fn = getattr(_om.GPTModel, name).__wrapped__
+            setattr(_om.GPTModel, name, decorator(fn))
+        _om._graph_rag_benchmark_patched = True
 
-    class RetryingGPTModel(GPTModel):
+    transient = (_json.JSONDecodeError, ValidationError, LengthFinishReasonError)
+
+    class RetryingGPTModel(_om.GPTModel):
         async def a_generate(self, prompt, schema=None):
             last_exc = None
-            for attempt in range(4):
+            for attempt in range(3):
                 try:
                     return await super().a_generate(prompt, schema)
                 except transient as e:
@@ -99,7 +127,7 @@ def _build_metric_model():
 
         def generate(self, prompt, schema=None):
             last_exc = None
-            for attempt in range(4):
+            for attempt in range(3):
                 try:
                     return super().generate(prompt, schema)
                 except transient as e:
@@ -110,7 +138,7 @@ def _build_metric_model():
         model="gpt-4o-mini",
         _openai_api_key=settings.openai_api_key.get_secret_value(),
         base_url=settings.llm_base_url,
-        generation_kwargs={"max_completion_tokens": 16000},
+        generation_kwargs={"max_completion_tokens": 2000},
     )
 
 
@@ -154,24 +182,35 @@ def evaluate_file(answers_path: Path, charts: bool) -> dict:
     has_expected = any(tc.expected_output for tc in test_cases)
     metrics = _build_metrics(has_expected)
 
-    from deepeval.evaluate.configs import AsyncConfig
+    from deepeval.evaluate.configs import AsyncConfig, ErrorConfig
 
+    # ignore_errors=True: when OpenRouter's gpt-4o-mini degenerates and hits
+    # max_completion_tokens, mark that metric as failed (score=None) and continue
+    # with the rest of the test cases instead of crashing the whole run.
     results = dv_evaluate(
         test_cases=test_cases,
         metrics=metrics,
         async_config=AsyncConfig(max_concurrent=4, throttle_value=0),
+        error_config=ErrorConfig(ignore_errors=True),
     )
 
-    # Aggregate scores
+    # Aggregate scores; skip None (metric failed, e.g. LengthFinishReasonError)
+    # so failures don't silently drag the mean down to look like zeros.
     metric_scores: dict[str, list[float]] = {}
+    metric_failures: dict[str, int] = {}
     for tc_result in results.test_results:
         for m in tc_result.metrics_data:
-            metric_scores.setdefault(m.name, []).append(m.score or 0.0)
+            if m.score is None:
+                metric_failures[m.name] = metric_failures.get(m.name, 0) + 1
+            else:
+                metric_scores.setdefault(m.name, []).append(m.score)
 
     summary = {
-        name: round(sum(scores) / len(scores), 4)
+        name: round(sum(scores) / len(scores), 4) if scores else None
         for name, scores in metric_scores.items()
     }
+    if metric_failures:
+        logger.warning("Metric failures (excluded from mean): %s", metric_failures)
 
     output = {
         "framework": framework,
